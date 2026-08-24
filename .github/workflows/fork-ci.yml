@@ -1,0 +1,94 @@
+# Fork-only CI. This file lives on the `ci` branch and never on the patch
+# branches, so it stays out of the diff sent upstream: for `pull_request`
+# events GitHub takes the workflow from the merge of base and head, so a
+# workflow present only on the base side still runs.
+#
+# Open fork PRs against `ci` rather than `master`, which is kept byte for
+# byte identical to upstream master.
+name: fork CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+
+  test:
+    name: test ${{ matrix.rust }} ${{ matrix.features || 'no features' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.81.0 is the crate's rust-version; the rest is what upstream runs,
+        # plus the two feature sets it never combines or omits.
+        rust: ["1.81.0", "stable", "beta"]
+        features: ["", "--features=serde", "--features=version-sync", "--all-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set toolchain
+        run: |
+          rustup set profile minimal
+          rustup override set ${{ matrix.rust }}
+      - run: cargo test ${{ matrix.features }}
+
+  platforms:
+    name: test stable ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --all-features
+
+  clippy:
+    name: no new clippy warnings
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Count warnings on head
+        run: echo "head=$(cargo clippy --all-targets --message-format=short 2>&1 | grep -c 'warning:' || true)" >> "$GITHUB_ENV"
+      - name: Count warnings on the base
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          cargo clean
+          echo "base=$(cargo clippy --all-targets --message-format=short 2>&1 | grep -c 'warning:' || true)" >> "$GITHUB_ENV"
+      - name: Compare
+        run: |
+          echo "base $base, head $head"
+          if [ "$head" -gt "$base" ]; then
+            echo "::error::$(( head - base )) new clippy warning(s)"
+            exit 1
+          fi
+
+  rebases-onto-upstream:
+    name: still rebases onto upstream master
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Rebase and test
+        run: |
+          git config user.name CI
+          git config user.email ci@example.invalid
+          git remote add upstream https://github.com/rust-ammonia/rust-content-security-policy.git
+          git fetch --quiet upstream master
+          git rebase upstream/master
+          cargo test --all-features
