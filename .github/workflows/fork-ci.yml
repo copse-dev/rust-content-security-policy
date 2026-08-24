@@ -60,16 +60,34 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+      # Counted from JSON, not from the rendered text: CARGO_TERM_COLOR wraps
+      # "warning:" in escape codes, so grepping for it silently counts zero and
+      # the comparison below passes whatever happens. Filtering on a non-null
+      # code also drops the "N warnings emitted" summaries.
       - name: Count warnings on head
-        run: echo "head=$(cargo clippy --all-targets --message-format=short 2>&1 | grep -c 'warning:' || true)" >> "$GITHUB_ENV"
+        run: |
+          set -o pipefail
+          n=$(cargo clippy --all-targets --message-format=json \
+                | jq -r 'select(.reason == "compiler-message" and .message.level == "warning" and .message.code != null) | .message.code.code' \
+                | wc -l)
+          echo "head=$n" >> "$GITHUB_ENV"
+          echo "head: $n warning(s)"
       - name: Count warnings on the base
         run: |
+          set -o pipefail
           git checkout --quiet ${{ github.event.pull_request.base.sha }}
           cargo clean
-          echo "base=$(cargo clippy --all-targets --message-format=short 2>&1 | grep -c 'warning:' || true)" >> "$GITHUB_ENV"
+          n=$(cargo clippy --all-targets --message-format=json \
+                | jq -r 'select(.reason == "compiler-message" and .message.level == "warning" and .message.code != null) | .message.code.code' \
+                | wc -l)
+          echo "base=$n" >> "$GITHUB_ENV"
+          echo "base: $n warning(s)"
       - name: Compare
         run: |
           echo "base $base, head $head"
+          if [ "$base" -eq 0 ] && [ "$head" -eq 0 ]; then
+            echo "::warning::clippy reported nothing on either side - check the counter still works"
+          fi
           if [ "$head" -gt "$base" ]; then
             echo "::error::$(( head - base )) new clippy warning(s)"
             exit 1
